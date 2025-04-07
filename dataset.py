@@ -27,7 +27,7 @@ class CustomImageDataset(ImageFolder):
         return image, path, target
 
 class Dataset:
-    def __init__(self, cls):
+    def __init__(self, cls):    #cls=coffeeDir
         self.cls = cls
         self.train_ds = CustomImageDataset(DATASETS_PATH / cls / "train", transform)
         self.test_ds = CustomImageDataset(DATASETS_PATH / cls / "test", transform)
