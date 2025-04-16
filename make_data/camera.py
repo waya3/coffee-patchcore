@@ -2,9 +2,9 @@ import cv2
 import os, sys
 import datetime
 sys.path.append("/home/kby/MasterThesis/patchcore/")
-from params import TRAINDIR
+from params import DATADIR
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(2)
 
 index = 0
 # キャプチャがオープンしている間続ける
@@ -22,7 +22,7 @@ while(cap.isOpened()):
         if cv2.waitKey(60)&0xFF == 32:  #space
             now = datetime.datetime.now()
             index += 1
-            filename = TRAINDIR + now.strftime("%m%d_%H%M_") + str(index) + ".png"
+            filename = DATADIR + "testseijo/" + now.strftime("%m%d_%H%M_") + str(index) + ".png"
             cv2.imwrite(filename, frame)
     else:
         break

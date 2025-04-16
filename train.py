@@ -7,8 +7,14 @@ import matplotlib.pyplot as plt
 
 def main():
     model = PatchCore(backbone_name=BACKBONE, pretrained=True)
-    train_ds, _ = Dataset(DATASET).get_dataloaders()
-    model.fit(train_ds)
+    train_ds, _ = Dataset().get_dataloaders()
+    
+    # ----------------------------------------------------- #
+    #---     1.学習済みモデルに正常画像を通して特徴マップ抽出   ---#
+    #---     2.特徴量マップをリサイズ                       ---#
+    #---     3.画像の中で特徴的なピクセルをピックアップして保持 ---#
+    # ----------------------------------------------------- #
+    model.fit(train_ds)     
     torch.save(model.state_dict(), MODELNAME)
     print("モデル保存先：", MODELNAME)
 
@@ -25,7 +31,7 @@ def main():
     plt.title("Memoly Bank")
     plt.xlabel("Component 1")
     plt.ylabel("Component 2")
-    plt.savefig(DIRNAME + "memolybank.jpg")
+    plt.savefig(f"{DIRNAME}/memolybank.jpg")
 
 if __name__ == "__main__":
     main()
