@@ -5,12 +5,16 @@ from dataset import SIZE
 import numpy as np
 import sys
 from sklearn import random_projection
+import seaborn as sns
+from scipy.stats import norm
+import matplotlib.pyplot as plt
+from params import ARG
 
 class PatchCore(torch.nn.Module):
     def __init__(
             self, 
             f_coreset = 0.1, 
-            backbone_name = "resnet18", 
+            backbone_name = "wide_resnet50_2", 
             coreset_eps = 0.90, 
             pool_last = False, 
             pretrained = True
@@ -21,7 +25,8 @@ class PatchCore(torch.nn.Module):
         self.feature_extractor = self._initialize_feature_extractor(backbone_name, pretrained)
         self.pool = torch.nn.AdaptiveAvgPool2d(1) if pool_last else None
         self.backbone_name = backbone_name
-        self.out_indices = (2, 3)
+        #2,3層の特徴を抽出
+        self.out_indices = (2, 3)                                       
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.feature_extractor = self.feature_extractor.to(self.device)
         self.f_coreset = f_coreset
@@ -45,11 +50,16 @@ class PatchCore(torch.nn.Module):
         return feature_extractor
 
     def __call__(self, x: torch.Tensor):
+        #勾配を計算しない　メモリ節約
         with torch.no_grad():
-            feature_maps = self.feature_extractor(x.to(self.device))
-        feature_maps = [fmap.to("cpu") for fmap in feature_maps]
+            #事前学習済みのモデルで特徴を抽出するモデル
+            feature_maps = self.feature_extractor(x.to(self.device))        #入力画像から特徴マップを取得
+        feature_maps = [fmap.to("cpu") for fmap in feature_maps]            #特徴マップをCPUに戻す
+        #マルチスケール特徴抽出＋グローバル特徴抽出
         if self.pool:
-            return feature_maps[:-1], self.pool(feature_maps[-1])
+            #複数層の特徴マップ，プーリングされた特徴
+            return feature_maps[:-1], self.pool(feature_maps[-1])           #最終層をプーリングして返す
+        #こっちのルート
         else:
             return feature_maps
 
@@ -57,39 +67,50 @@ class PatchCore(torch.nn.Module):
     #学習    
     def fit(self, train_dl):
         self.patch_lib = self._create_patch_library(train_dl)
+        # print(np.shape(self.patch_lib))                                                         #[502528,1536]
         self.reduce_patch_lib = self._reduce_patch_library()        #最終的なpatch_libは下の特徴量マップからピクセルの情報のみを削っている
+        # print(f"reduce_patch_lib:{self.reduce_patch_lib.shape}\n{self.reduce_patch_lib}")   #[50252,1536]
 
-    #特徴マップの抽出
+    #特徴マップの抽出，patch_libに追加
     def _create_patch_library(self, train_dl):
         patch_lib = []
         for sample, _, _ in tqdm(train_dl, **self.get_tqdm_params()):
-            feature_maps = self(sample)
+            # print(sample.shape)                                                    #[1,3,128,128]
+            feature_maps = self(sample)                                            #__call__関数呼び出し
+            # print(f"feature_maps[0]:{feature_maps[0].shape}\n{feature_maps}")      #[1,512,16,16]   
+            # print(f"feature_maps[1]:{feature_maps[1].shape}\n{feature_maps}")      #[1,1024,8,8]
             resized_maps = self._resize_feature_maps(feature_maps)
-            patch = self._reshape_and_concatenate(resized_maps)
-            patch_lib.append(patch)
-        return torch.cat(patch_lib, 0)
+            # print(f"resized_maps[0]:{resized_maps[0].shape}\n{resized_maps}")      #[1,512,16,16]
+            # print(f"resized_maps[1]:{resized_maps[1].shape}\n{resized_maps}")      #[1,1024,16,16]
+            patch = self._reshape_and_concatenate(resized_maps)                    #[1,1536,16,16]
+            # print(f"resized_patch:{patch.shape}\n{patch}")                         #[256,1536]
+            patch_lib.append(patch)        
+        print(np.shape(patch_lib))                                                  #[1963,256,1536]
+        return torch.cat(patch_lib, 0)  #0次元で連結
 
     #リサイズ
     def _resize_feature_maps(self, feature_maps):
         if self.resize is None:
-            largest_fmap_size = feature_maps[0].shape[-2:]      #すべての層の出力を最も大きな画像サイズに揃える
-            self.resize = torch.nn.AdaptiveAvgPool2d(largest_fmap_size)     #画像サイズの小さなより深い層の出力を引き伸ばしている
+            largest_fmap_size = feature_maps[0].shape[-2:]     
+            self.resize = torch.nn.AdaptiveAvgPool2d(largest_fmap_size)     #すべての層の出力を最も大きな画像サイズに揃える，画像サイズの小さなより深い層の出力を引き伸ばしている
         return [self.resize(self.average(fmap)) for fmap in feature_maps]   
 
     def _reshape_and_concatenate(self, resized_maps):
         patch = torch.cat(resized_maps, 1)
+        # print(f"patch:{patch.shape}\n{patch}")      #[1,1536,16,16]
         return patch.reshape(patch.shape[1], -1).T      #特徴マップの構造をピクセル単位でバラし，2次元構造へ変形
 
     def _reduce_patch_library(self):
+        print(self.patch_lib.shape[0])  #
         if self.f_coreset < 1:
             self.coreset_idx = self._get_coreset_idx_randomp(   #Coresetが次元圧縮しても精度があんまり落ちないサンプリング手法らしい
                 self.patch_lib,
-                n=int(self.f_coreset * self.patch_lib.shape[0]),
+                n=int(self.f_coreset * self.patch_lib.shape[0]),    #self.patch_lib.shape[0]=train_data(1963)*patch.shape[0](256)
                 eps=self.coreset_eps,
             )
             self.patch_lib = self.patch_lib[self.coreset_idx]       #coreset_idxでピックアップされたピクセルを特徴量マップから取り出してpatch_libに保持
             x = self.patch_lib.to('cpu').detach().numpy().copy()
-            np.save("./npy_data/patch_lib.npy", x)
+            np.save(f"/home/kby/mnt/hdd/coffee/PatchCore/npy_data/patch_lib_{ARG}.npy", x)        #モデルの保存先
             return x
 
     #スパース・ランダム射影による圧縮
@@ -132,19 +153,29 @@ class PatchCore(torch.nn.Module):
     def predict(self, sample):
         feature_maps = self(sample)
         resized_maps = self._resize_feature_maps(feature_maps)      #特徴マップリサイズ 学習時同様
-        patch = self._reshape_and_concatenate(resized_maps)         #特徴マップ変形
-        s, s_map = self._compute_anomaly_scores(patch, feature_maps)
-        return s, s_map, patch
+        patch = self._reshape_and_concatenate(resized_maps)         #特徴マップ変形     [256,1536]
+        s, s_map, min_val = self._compute_anomaly_scores(patch, feature_maps)
+        return s, s_map, patch, min_val
 
     def _compute_anomaly_scores(self, patch, feature_maps):
-        dist = torch.cdist(patch, self.patch_lib)                   #推論画像のpatchと学習時のpatch_libとの距離を計算
-        min_val, min_idx = torch.min(dist, dim=1)                   #distの各行で最小値となる要素とそのインデックスを取得
+        dist = torch.cdist(patch, self.patch_lib)                   #推論画像のpatchと学習時のpatch_libとの距離を計算 [256,50252]
+        print(self.patch_lib.shape)
+        print(dist.shape)
+        min_val, min_idx = torch.min(dist, dim=1)                   #distの各行で最小値となる要素とそのインデックスを取得 minval.shape=[256]
+        min_min_val, max_min_val = torch.min(min_val), torch.max(min_val)
+        print(max_min_val-min_min_val)
+        self.min_val = min_val
+        
+        # self.hist()
         s_star, s_idx = torch.max(min_val), torch.argmax(min_val)   #min_valの最大値，そのインテックスを取得
         #画像全体の異常度を計算
         w = self._reweight(patch, min_idx, s_star, s_idx)
+        # print(min_val.shape)
+        # print(min_val.numpy())
         s = w * s_star
         s_map = self._create_segmentation_map(min_val, feature_maps)
-        return s, s_map     #画像全体の異常度，ピクセルごとの異常マップ
+        # print(s_map)
+        return s, s_map, min_val     #画像全体の異常度，ピクセルごとの異常マップ
 
     def _reweight(self, patch, min_idx, s_star, s_idx):
         m_test = patch[s_idx].unsqueeze(0)                          
@@ -157,7 +188,8 @@ class PatchCore(torch.nn.Module):
 
     #ピクセル単位の異常度マップとする
     def _create_segmentation_map(self, min_val, feature_maps):      #patch.libの中から最も距離の近いピクセルを拾ってきたのに，距離が遠かったら以上の可能性大
-        s_map = min_val.view(1, 1, *feature_maps[0].shape[-2:])
+        s_map = min_val.view(1, 1, *feature_maps[0].shape[-2:])     #[1,1,16,16]
+        # print(min_val)
         s_map = torch.nn.functional.interpolate(
             s_map, size=(SIZE, SIZE), mode='bilinear'
         )
@@ -168,7 +200,7 @@ class PatchCore(torch.nn.Module):
     def standby(self):
         largest_fmap_size = torch.LongTensor([SIZE // 8, SIZE // 8])
         self.resize = torch.nn.AdaptiveAvgPool2d(largest_fmap_size)
-        self.patch_lib = np.load("./npy_data/patch_lib.npy")
+        self.patch_lib = np.load(f"/home/kby/mnt/hdd/coffee/PatchCore/npy_data/patch_lib_{ARG}.npy")
         self.patch_lib = torch.from_numpy(self.patch_lib.astype(np.float32)).clone()
     
     def get_tqdm_params(self):

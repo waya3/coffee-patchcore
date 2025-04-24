@@ -4,6 +4,7 @@ import torch
 from params import MODELNAME, DATASET, BACKBONE, DIRNAME
 from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
+from params import ARG
 
 def main():
     model = PatchCore(backbone_name=BACKBONE, pretrained=True)
@@ -16,9 +17,9 @@ def main():
     # ----------------------------------------------------- #
     model.fit(train_ds)     
     torch.save(model.state_dict(), MODELNAME)
-    print("モデル保存先：", MODELNAME)
+    print("モデル保存先：", f"{MODELNAME}, /home/kby/mnt/hdd/coffee/PatchCore/npy_data/patch_lib_{ARG}.npy")
 
-    print(model.patch_lib.shape)
+    print(model.patch_lib.shape)    #[50252,2]
     #メモリバンク可視化したい
     memory_bank = model.patch_lib
     memory_bank = memory_bank.detach().cpu().numpy()

@@ -1,12 +1,15 @@
 import os
 import cv2
 import numpy as np
-from params import HEADER, RESULTDIR
+from params import HEADER, RESULTDIR, RED, END
 from dataset import SIZE
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 from sklearn.metrics import roc_curve, auc
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+import seaborn as sns
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 import torch
 from patchcore import PatchCore
 from utils import *
@@ -21,14 +24,18 @@ class AnomalyDetector:
         self.img_num = 0
         self.patch_lib = []
         self.true = []
+        self.pred = []
         self.scores = []
 
+        self.flag = False
         self.good_num = 0
         self.bad_num = 0
         self.tp = 0
         self.fp = 0
         self.tn = 0
         self.fn = 0
+
+        self.graph = []
 
     def make_anomalymap(self, s_map, score, filename):
         # ----------------------------------------------------- #
@@ -68,8 +75,10 @@ class AnomalyDetector:
 
     def run(self, dataloader):
         self.save_data = []
+        self.fig, self.ax = plt.subplots()
         cnt = 0
         for images, paths, _ in dataloader:
+            self.print_BeanType(paths)
             for i in range(images.size(0)):
                 path = paths[i]
                 self.dir_name = os.path.basename(os.path.dirname(path))
@@ -78,11 +87,15 @@ class AnomalyDetector:
                 image_tensor = images[i].unsqueeze(0)
                 filename = os.path.basename(path)
                 #異常スコア，ピクセルごとの異常度，メモリバンク
-                img_lvl_anom_score, s_map, patch = self.model.predict(image_tensor)
-                
+                img_lvl_anom_score, s_map, patch, min_val = self.model.predict(image_tensor)
                 score = round(img_lvl_anom_score.item(), 2)
                 self.scores.append(score)
+                #matplotでmin_val描画
+                graph_img = self.graph_paint(min_val, score, filename)
                 img_score = cv2.putText(self.img_org, str(score), (0,10), cv2.FONT_HERSHEY_DUPLEX, 0.5, (255,255,255))
+                img_score = cv2.resize(img_score, (480,480))
+                #連結
+                img_score = cv2.hconcat([img_score, graph_img])
                 #異常検知
                 self.anomaly_detect(filename, score, img_score)
 
@@ -95,36 +108,42 @@ class AnomalyDetector:
         #予測の評価
         self.eval()
         Save2Csv(self.save_data, HEADER, save_path=self.csvPath, save_mode="w")
-        #ROC曲線
-        self.make_roc()
+
+        #matplotアニメーション
+        # ani = animation.ArtistAnimation(self.fig, self.graph)
+        # ani.save(f"{RESULTDIR}/graph.mp4", writer="ffmpeg")
 
     def anomaly_detect(self, filename, score, img_score):
         #異常判定
         is_anomaly = score < self.threshold
         print(f"ファイル名:{filename}, 異常値スコア: {score}, 異常フラグ: {not is_anomaly}")
         self.save_data.append([filename, score, is_anomaly])
-        if is_anomaly:  #正と予想
+        if is_anomaly:              #正と予想
             cv2.imwrite(f"{RESULTDIR}/good/{filename}", img_score)
             #正常豆と欠点豆正解数を調査
             if self.dir_name == "good":  #正解は正
                 self.good_num += 1
                 self.tp += 1
                 self.true.append(0)     #正常が0，異常が1
+                self.pred.append(0)
             else:                   #正解は負
                 self.bad_num += 1   
                 self.fp += 1
                 self.true.append(1)
-        else:           #負と予想
+                self.pred.append(0)
+        else:                       #負と予想
             cv2.imwrite(f"{RESULTDIR}/bad/{filename}", img_score)
             #正常豆と欠点豆正解数を調査
             if self.dir_name == "good":  #正解は正
                 self.good_num += 1
                 self.fn += 1
                 self.true.append(0)
+                self.pred.append(1)
             else:                   #正解は負
                 self.bad_num += 1
                 self.tn += 1
                 self.true.append(1)
+                self.pred.append(1)
 
         cv2.imwrite(f"{RESULTDIR}/test_all/{filename}", img_score)
 
@@ -134,7 +153,22 @@ class AnomalyDetector:
         self.recall = round(self.tp / (self.tp + self.fn), 4)
         self.specificity = round(self.tn / (self.fp + self.tn), 4)
         self.Fmeasure = round(2 * self.precision * self.recall / (self.precision + self.recall), 4)
+
+        #混同行列
+        self.confusion()
+        #ROC曲線
+        self.make_roc()
     
+    def confusion(self):
+        cm = confusion_matrix(self.true, self.pred)
+        disp = ConfusionMatrixDisplay(confusion_matrix=cm)
+        disp.plot(cmap=plt.cm.Blues)
+        plt.xlabel("Predicted")
+        plt.ylabel("Actual")
+        plt.title("Confusion Matrix")
+        plt.savefig(f"{RESULTDIR}/ConfusionMatrix.jpg")
+        plt.close()
+
     def make_roc(self):
         fpr, tpr, thresholds = roc_curve(self.true, self.scores)
         roc_auc = auc(fpr, tpr)
@@ -147,3 +181,27 @@ class AnomalyDetector:
         plt.legend()
         plt.grid(True)
         plt.savefig(f"{RESULTDIR}/ROC.jpg")
+        plt.close()
+
+    def print_BeanType(self, paths):
+        dir = os.path.basename(os.path.dirname(paths[0]))
+        if dir == "good" and not self.flag:
+            print(f"{RED}正常豆{END}")
+            self.flag = True
+        elif dir != "good" and self.flag:
+            print(f"{RED}欠点豆{END}")
+            self.flag = False
+
+    def graph_paint(self, min_val, score, filename):
+        self.ax.cla()
+        im, = self.ax.plot(min_val, color="blue")
+        self.ax.set_ylim(10, 60)
+        text = self.ax.text(2,62, f"{self.dir_name}:{score}", fontsize=15, color="black")
+        self.graph.append([im,text])
+        plt.savefig(f"{RESULTDIR}/min_val/{filename}")
+        dst = cv2.imread(f"{RESULTDIR}/min_val/{filename}")
+        # dst = cv2.resize(dst, (171,128))
+        return dst
+        # plt.pause(.1)
+
+        

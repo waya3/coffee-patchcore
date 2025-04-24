@@ -1,3 +1,5 @@
+RED = '\033[31m'
+END = '\033[0m'
 ARG = ""
 
 DATADIR = "/home/kby/mnt/hdd/coffee/PatchCore/data/"
