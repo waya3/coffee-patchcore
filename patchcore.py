@@ -3,6 +3,10 @@ import torch
 import timm
 from dataset import SIZE
 import numpy as np
+from detectron2.config import get_cfg
+from detectron2.modeling import build_model
+from detectron2 import model_zoo
+from detectron2.checkpoint import DetectionCheckpointer
 import sys
 from sklearn import random_projection
 import seaborn as sns
@@ -22,13 +26,16 @@ class PatchCore(torch.nn.Module):
         
         super().__init__()
 
-        self.feature_extractor = self._initialize_feature_extractor(backbone_name, pretrained)
         self.pool = torch.nn.AdaptiveAvgPool2d(1) if pool_last else None
         self.backbone_name = backbone_name
         #2,3層の特徴を抽出
         self.out_indices = (2, 3)                                       
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.feature_extractor = self.feature_extractor.to(self.device)
+        # self.feature_extractor = self._initialize_feature_extractor(backbone_name, pretrained)    #ImageNetの場合
+        # self.feature_extractor = self.feature_extractor.to(self.device)
+        
+        self.detectron2_model = self._detectron2_model()
+        self.detectron2_model = self.detectron2_model.to(self.device)
         self.f_coreset = f_coreset
         self.coreset_eps = coreset_eps
         self.average = torch.nn.AvgPool2d(3, stride=1)
@@ -49,11 +56,58 @@ class PatchCore(torch.nn.Module):
         feature_extractor.eval()
         return feature_extractor
 
+    def _detectron2_model(self):
+        cfg = get_cfg()
+        cfg.merge_from_file(model_zoo.get_config_file("COCO-InstanceSegmentation/mask_rcnn_R_50_DC5_3x.yaml"))
+        # cfg.merge_from_file(model_zoo.get_config_file("Base-RCNN-C4.yaml"))
+        cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("COCO-InstanceSegmentation/mask_rcnn_R_50_DC5_3x.yaml")
+        # cfg.MODEL.WEIGHTS = model_zoo.get_checkpoint_url("Base-RCNN-C4.yaml")
+        cfg.MODEL.DEVICE = "cpu"
+        model = build_model(cfg)
+        DetectionCheckpointer(model).load(cfg.MODEL.WEIGHTS)
+        model.eval()
+        return model
+
+    #ImageNetの場合
+    # def __call__(self, x: torch.Tensor):
+    #     #勾配を計算しない　メモリ節約
+    #     with torch.no_grad():
+    #         #事前学習済みのモデルで特徴を抽出するモデル
+    #         feature_maps = self.feature_extractor(x.to(self.device))        #入力画像から特徴マップを取得
+    #         # print(feature_maps[0].shape)                                    #[1,512,16,16]
+    #         # print(feature_maps[1].shape)                                    #[1,1024,8,8]
+    #     feature_maps = [fmap.to("cpu") for fmap in feature_maps]            #特徴マップをCPUに戻す
+    #     #マルチスケール特徴抽出＋グローバル特徴抽出
+    #     if self.pool:
+    #         #複数層の特徴マップ，プーリングされた特徴
+    #         return feature_maps[:-1], self.pool(feature_maps[-1])           #最終層をプーリングして返す
+    #     #こっちのルート
+    #     else:
+    #         return feature_maps
+    
+    #detectron2の場合
     def __call__(self, x: torch.Tensor):
         #勾配を計算しない　メモリ節約
+        feature_maps = []
         with torch.no_grad():
             #事前学習済みのモデルで特徴を抽出するモデル
-            feature_maps = self.feature_extractor(x.to(self.device))        #入力画像から特徴マップを取得
+            # feature_maps = self.feature_extractor(x.to(self.device))        #入力画像から特徴マップを取得
+            # print(feature_maps[0].shape)                                    #[1,512,16,16]
+            # print(feature_maps[1].shape)                                    #[1,1024,8,8]
+            x = self.detectron2_model.backbone.stem(x.to(self.device))
+            res2 = self.detectron2_model.backbone.res2(x)
+            res3 = self.detectron2_model.backbone.res3(res2)
+            res4 = self.detectron2_model.backbone.res4(res3)
+            res5 = self.detectron2_model.backbone.res5(res4)
+            # print(res2.shape)   #[1,512,32,32]
+            # print(res3.shape)   #[1,512,16,16]
+            # print(res4.shape)   #[1,1024,8,8]
+            # print(res5.shape)   #[1,2048,8,8]
+            feature_maps.append(res2)
+            feature_maps.append(res3)
+            # print(feature_maps[0].shape)
+            # print(feature_maps[1].shape)
+            # feature_maps = self.detectron2_model.backbone(x.to(self.device))
         feature_maps = [fmap.to("cpu") for fmap in feature_maps]            #特徴マップをCPUに戻す
         #マルチスケール特徴抽出＋グローバル特徴抽出
         if self.pool:
@@ -85,7 +139,7 @@ class PatchCore(torch.nn.Module):
             patch = self._reshape_and_concatenate(resized_maps)                    #[1,1536,16,16]
             # print(f"resized_patch:{patch.shape}\n{patch}")                         #[256,1536]
             patch_lib.append(patch)        
-        print(np.shape(patch_lib))                                                  #[1963,256,1536]
+        # print(np.shape(patch_lib))                                                  #[1963,256,1536]
         return torch.cat(patch_lib, 0)  #0次元で連結
 
     #リサイズ
@@ -163,42 +217,59 @@ class PatchCore(torch.nn.Module):
         print(dist.shape)
         min_val, min_idx = torch.min(dist, dim=1)                   #distの各行で最小値となる要素とそのインデックスを取得 minval.shape=[256]
         min_min_val, max_min_val = torch.min(min_val), torch.max(min_val)
-        print(max_min_val-min_min_val)
         self.min_val = min_val
         
         # self.hist()
         s_star, s_idx = torch.max(min_val), torch.argmax(min_val)   #min_valの最大値，そのインテックスを取得
         #画像全体の異常度を計算
         w = self._reweight(patch, min_idx, s_star, s_idx)
-        # print(min_val.shape)
+        print(min_val.shape)
         # print(min_val.numpy())
         s = w * s_star
+        # s_map = self._reweight_patch(patch, min_val, min_idx, s_star, s_idx)
         s_map = self._create_segmentation_map(min_val, feature_maps)
         # print(s_map)
         return s, s_map, min_val     #画像全体の異常度，ピクセルごとの異常マップ
 
     def _reweight(self, patch, min_idx, s_star, s_idx):
-        m_test = patch[s_idx].unsqueeze(0)                          
+        m_test = patch[s_idx].unsqueeze(0)
+        print(patch.shape)  #[256,1536]
+        print(m_test.shape) #[1,1536]                        
         m_star = self.patch_lib[min_idx[s_idx]].unsqueeze(0)        #s_starの算出に関わったpatch内のピクセルの特徴量とpatch_lib内のピクセルの特徴量を取得
         w_dist = torch.cdist(m_star, self.patch_lib)                #m_starとpatch_libの各ピクセルとの距離を計算してw_distに
         _, nn_idx = torch.topk(w_dist, k=self.n_reweight, largest=False)                #w_distが最も小さいk個のインデックスを取得
         m_star_knn = torch.linalg.norm(m_test - self.patch_lib[nn_idx[0, 1:]], dim=1)   #得られたk個のピクセルとm_testの距離を計算，m_star_knn
+        print(m_star_knn)
+        print(s_star)
         D = torch.sqrt(torch.tensor(patch.shape[1]))
+        print(torch.sum(torch.exp(m_star_knn / D)))
+        print(torch.exp(m_star_knn / D))
         return 1 - (torch.exp(s_star / D) / torch.sum(torch.exp(m_star_knn / D)))       #重みの計算.m_star_knnが小さいほど重みは0に近づき，m_star_knnが大きいほど重みは1に近づく
 
     #ピクセル単位の異常度マップとする
     def _create_segmentation_map(self, min_val, feature_maps):      #patch.libの中から最も距離の近いピクセルを拾ってきたのに，距離が遠かったら以上の可能性大
-        s_map = min_val.view(1, 1, *feature_maps[0].shape[-2:])     #[1,1,16,16]
+        s_map = min_val.view(1, 1, *feature_maps[0].shape[-2:])     #[1,1,16,16]    
         # print(min_val)
         s_map = torch.nn.functional.interpolate(
             s_map, size=(SIZE, SIZE), mode='bilinear'
         )
         return s_map
 
-
+    def _reweight_patch(self, patch, min_val, min_idx, s_star, s_idx):
+        s_map = []
+        for i, val in enumerate(min_val):
+            m_test = patch[s_idx].unsqueeze(0)
+            m_star = self.patch_lib[min_idx[i]].unsqueeze(0)
+            w_dist = torch.cdist(m_star, self.patch_lib)
+            _, nn_idx = torch.topk(w_dist, k=self.n_reweight, largest=False)
+            m_star_knn = torch.linalg.norm(m_test - self.patch_lib[nn_idx[0, 1:]], dim=1)
+            D = torch.sqrt(torch.tensor(patch.shape[1]))
+            w = (1 - (torch.exp(s_star / D) / torch.sum(torch.exp(m_star_knn / D))))
+            s_map.append(w * val)
+        return s_map
 
     def standby(self):
-        largest_fmap_size = torch.LongTensor([SIZE // 8, SIZE // 8])
+        largest_fmap_size = torch.LongTensor([SIZE // 4, SIZE // 4])        #特徴マップの大きさに応じて指定
         self.resize = torch.nn.AdaptiveAvgPool2d(largest_fmap_size)
         self.patch_lib = np.load(f"/home/kby/mnt/hdd/coffee/PatchCore/npy_data/patch_lib_{ARG}.npy")
         self.patch_lib = torch.from_numpy(self.patch_lib.astype(np.float32)).clone()

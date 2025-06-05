@@ -2,6 +2,7 @@ import pathlib
 import shutil
 import csv
 import cv2
+import numpy as np
 
 def delete_dir(path):
     shutil.rmtree(path)
@@ -41,3 +42,15 @@ def Save2Csv(save_data, header, save_path : str, save_mode = 'w'):
         writer.writerow(save_data)
 
     return 0
+
+def calc_pstdev(data):
+    data = np.array(data)
+    data_flat = data.flatten()
+    return round(np.std(data_flat), 3)
+
+#AUCから最適なしきい値を決定
+def Youden(fpr, tpr, th):
+    youden_j = tpr -fpr
+    optimal_idx = np.argmax(youden_j)
+    optimal_th = th[optimal_idx]
+    return optimal_th
