@@ -1,7 +1,7 @@
 import os
 import cv2
 import numpy as np
-from params import HEADER, RESULTDIR, RED, END
+from params import HEADER, RESULTDIR, RED, END, ARG
 from dataset import SIZE
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
@@ -21,7 +21,6 @@ class AnomalyDetector:
         self.threshold = threshold
         self.model = model
         self.ave_time = 0.0
-        self.csvPath = f"{RESULTDIR}/score.csv"
         self.img_org =[]
         self.img_num = 0
         self.patch_lib = []
@@ -86,7 +85,9 @@ class AnomalyDetector:
         plt.ylabel("Component 2")
         plt.savefig(f"{RESULTDIR}/memorybank_inf.jpg")
 
-    def run(self, dataloader):
+    def run(self, dataloader, num):
+        self.num = num
+        self.csvPath = f"{RESULTDIR}/score_{str(self.num)}.csv"
         self.save_data = []
         self.fig, self.ax = plt.subplots()
         cnt = 0
@@ -100,8 +101,10 @@ class AnomalyDetector:
                 image_tensor = images[i].unsqueeze(0)
                 filename = os.path.basename(path)
                 #異常スコア，ピクセルごとの異常度，メモリバンク
-                img_lvl_anom_score, s_map, patch, min_val = self.model.predict(image_tensor)
+                img_lvl_anom_score, s_map, patch, min_val, m_test, m_star = self.model.predict(image_tensor)
                 Nmin_val = min_val.to("cpu").detach().numpy().copy()
+                m_test = m_test.to("cpu").detach().numpy().copy()
+                m_star = m_star.to("cpu").detach().numpy().copy()
                 pstdev = calc_pstdev(Nmin_val)      #標準偏差
                 score = round(img_lvl_anom_score.item(), 2)
                 self.scores.append(score)
@@ -115,6 +118,13 @@ class AnomalyDetector:
                 self.img_score = cv2.resize(self.img_score, (480,480))
                 #連結
                 img_scoreAndminval = cv2.hconcat([self.img_score, graph_img])
+
+                #m_test, m_star
+                graph_mtest = self.graph_paint_test_star(m_test, score, filename)
+                graph_mstar = self.graph_paint_test_star(m_star, score, filename)
+                img_mtest_mstar = cv2.hconcat([graph_mtest, graph_mstar])
+                cv2.imwrite(f"{RESULTDIR}/m_test_star/{filename}", img_mtest_mstar)
+
                 #異常検知
                 self.anomaly_detect(filename, score, img_scoreAndminval, Nmin_val)
 
@@ -133,7 +143,9 @@ class AnomalyDetector:
         self.img_num = self.good_num + self.bad_num
         #予測の評価
         self.eval()
-        Save2Csv(self.save_data, HEADER, save_path=self.csvPath, save_mode="w")
+        acc_header = ["Threshold", "Accuracy", "Precision", "Recall", "Specificity", "F1"]
+        Save2Csv([self.opt_th, self.accuracy, self.precision, self.recall, self.specificity, self.Fmeasure], acc_header, save_path=self.csvPath, save_mode="w")
+        Save2Csv(self.save_data, HEADER, save_path=self.csvPath, save_mode="a")
 
         #matplotアニメーション
         # ani = animation.ArtistAnimation(self.fig, self.graph)
@@ -216,7 +228,7 @@ class AnomalyDetector:
         #混同行列
         self.confusion()
         #ROC曲線
-        self.make_roc()
+        self.opt_th = self.make_roc()
     
     def confusion(self):
         cm = confusion_matrix(self.true, self.pred)
@@ -225,7 +237,7 @@ class AnomalyDetector:
         plt.xlabel("Predicted")
         plt.ylabel("Actual")
         plt.title("Confusion Matrix")
-        plt.savefig(f"{RESULTDIR}/ConfusionMatrix.jpg")
+        plt.savefig(f"{RESULTDIR}/ConfusionMatrix_{ARG}_{str(self.num)}.jpg")
         plt.close()
 
     def make_roc(self):
@@ -241,8 +253,9 @@ class AnomalyDetector:
         plt.title("ROC Curve for PatchCore")
         plt.legend()
         plt.grid(True)
-        plt.savefig(f"{RESULTDIR}/ROC.jpg")
+        plt.savefig(f"{RESULTDIR}/ROC_{ARG}_{str(self.num)}.jpg")
         plt.close()
+        return opt_th
 
 
     def print_BeanType(self, paths):
@@ -265,5 +278,17 @@ class AnomalyDetector:
         # dst = cv2.resize(dst, (171,128))
         return dst
         # plt.pause(.1)
+
+    def graph_paint_test_star(self, m_value, score, filename):
+        m_value = np.squeeze(m_value)
+        self.ax.cla()
+        im, = self.ax.plot(m_value, color="blue")
+        self.ax.set_ylim(10, 30)
+        text = self.ax.text(2,32, f"{self.dir_name},{self.FB}:{score}", fontsize=15, color="black")
+        self.graph.append([im,text])
+        plt.savefig(f"{RESULTDIR}/m_test_star/{filename}")
+        dst = cv2.imread(f"{RESULTDIR}/m_test_star/{filename}")
+
+        return dst
 
 

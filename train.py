@@ -1,6 +1,7 @@
 from patchcore import PatchCore
 from dataset import Dataset
 import torch
+import time
 from params import MODELNAME, DATASET, BACKBONE, DIRNAME
 from sklearn.decomposition import PCA
 import matplotlib.pyplot as plt
@@ -15,11 +16,14 @@ def main():
     #---     2.特徴量マップをリサイズ                       ---#
     #---     3.画像の中で特徴的なピクセルをピックアップして保持 ---#
     # ----------------------------------------------------- #
+    start = time.perf_counter()
     model.fit(train_ds)     
+    end = time.perf_counter()
     torch.save(model.state_dict(), MODELNAME)
-    print("モデル保存先：", f"{MODELNAME}, /home/kby/mnt/hdd/coffee/PatchCore/npy_data/patch_lib_{ARG}.npy")
-
+    print("モデル保存先：", f"{MODELNAME}, ../../PatchCore/npy_data/patch_lib_{ARG}.npy")
     print(model.patch_lib.shape)    #[50252,2]
+    print(f"実行時間:" + "{:2f}".format(end - start) + "秒")
+    
     #メモリバンク可視化したい
     memory_bank = model.patch_lib
     memory_bank = memory_bank.detach().cpu().numpy()
