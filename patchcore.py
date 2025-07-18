@@ -13,6 +13,7 @@ import seaborn as sns
 from scipy.stats import norm
 import matplotlib.pyplot as plt
 from params import ARG
+import math
 
 class PatchCore(torch.nn.Module):
     def __init__(
@@ -44,6 +45,7 @@ class PatchCore(torch.nn.Module):
         self.patch_lib = []
         self.reduce_patch_lib = []
         self.resize = None
+
 
     def _initialize_feature_extractor(self, backbone_name, pretrained):
         feature_extractor = timm.create_model(
@@ -118,6 +120,66 @@ class PatchCore(torch.nn.Module):
     #     else:
     #         return feature_maps
 
+    def _self_attention(self, feature_maps):
+        map2 = feature_maps[0]
+        print(map2.shape)
+        map3 = feature_maps[1]
+        out_map2 = []
+        out_map3 = []
+        for i, map in enumerate(map2[0]):
+            map = map.flatten()
+            map_col = map.view(-1,1) #[256,1]
+            map_row = map.view(1,-1) #[1,256]
+            score2 = torch.matmul(map_col, map_row) / 256**0.5  #[256,256]
+            attention2 = torch.nn.functional.softmax(score2)    #[256,256]
+            out2 = torch.matmul(attention2, map)
+            out2 = out2.view(16,16)
+            out_map2.append(out2)
+        output2 = torch.stack(out_map2, dim=0)
+        output2 = output2.unsqueeze(0)
+        print(output2.shape)
+        for i, map in enumerate(map3[0]):
+            map = map.flatten()
+            map_col = map.view(-1,1)
+            map_row = map.view(1,-1)
+            score3 = torch.matmul(map_col, map_row) / 64**0.5
+            attention3 = torch.nn.functional.softmax(score3)
+            out3 = torch.matmul(attention3, map)
+            out3 = out3.view(8,8)
+            out_map3.append(out3)
+        output3 = torch.stack(out_map3, dim=0)
+        output3 = output3.unsqueeze(0)
+        print(output3.shape)
+        maps = [output2,output3]
+
+        return maps
+
+    def _position_encoding(self, feature_maps):
+        d_model = 512
+        map2 = feature_maps[0].squeeze(0)
+        print(map2.shape)
+        map3 = feature_maps[1].squeeze(0)
+        pe = torch.zeros_like(map2)
+        for y in range(16):
+            for x in range(16):
+                for i in range(0, d_model, 2):
+                    pe[i+1,y,x] = math.sin(y / (10000 ** (2*i / d_model)))
+                    pe[i+1,y,x] = math.cos(x / (10000 ** (2*i / d_model)))
+        pe2 = map2 + pe
+        pe2 = pe2.unsqueeze(0)
+        
+        pe = torch.zeros_like(map3)
+        d_model = 1024
+        for y in range(8):
+            for x in range(8):
+                for i in range(0, d_model, 2):
+                    pe[i+1,y,x] = math.sin(y / (10000 ** (2*i / d_model)))
+                    pe[i+1,y,x] = math.cos(x / (10000 ** (2*i / d_model)))
+        pe3 = map3 + pe
+        pe3 = pe.unsqueeze(0)
+        print(pe3.shape, pe2.shape)
+        out = [pe2, pe3]
+        return out
 
     #学習    
     def fit(self, train_dl):
@@ -131,7 +193,9 @@ class PatchCore(torch.nn.Module):
         patch_lib = []
         for sample, _, _ in tqdm(train_dl, **self.get_tqdm_params()):
             # print(sample.shape)                                                    #[1,3,128,128]
-            feature_maps = self(sample)                                            #__call__関数呼び出し
+            feature_maps = self(sample)                                             #__call__関数呼び出し 2,3層の特徴マップ
+            feature_maps = self._position_encoding(feature_maps)                                         
+            feature_maps = self._self_attention(feature_maps)
             # print(f"feature_maps[0]:{feature_maps[0].shape}\n{feature_maps}")      #[1,512,16,16]   
             # print(f"feature_maps[1]:{feature_maps[1].shape}\n{feature_maps}")      #[1,1024,8,8]
             resized_maps = self._resize_feature_maps(feature_maps)
@@ -210,6 +274,8 @@ class PatchCore(torch.nn.Module):
     #推論
     def predict(self, sample):
         feature_maps = self(sample)
+        feature_maps = self._position_encoding(feature_maps)  
+        feature_maps = self._self_attention(feature_maps)           #SelfAttention
         resized_maps = self._resize_feature_maps(feature_maps)      #特徴マップリサイズ 学習時同様
         patch = self._reshape_and_concatenate(resized_maps)         #特徴マップ変形     [256,1536]
         s, s_map, min_val, m_test, m_star = self._compute_anomaly_scores(patch, feature_maps)

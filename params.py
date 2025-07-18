@@ -1,6 +1,6 @@
 RED = '\033[31m'
 END = '\033[0m'
-ARG = "R50_aug"
+ARG = "R50_aug_SA"
 
 # DATADIR = "../../PatchCore/data/"
 DATADIR = "/home/kby/mnt/hdd/coffee/PatchCore/data/"
@@ -10,7 +10,8 @@ DATASET = "coffee"
 BACKBONE = "resnet50"
 # THRESHOLD = 23        #WideResNet50
 # THRESHOLD = 14.85          #Resnet50_aug
-THRESHOLD = 19.85          #Resnet50_aug
+# THRESHOLD = 16.35         #Resnet50_aug
+THRESHOLD = 5.44         #Resnet50_aug
 # THRESHOLD = 9.11          #Resnet50 2,4
 # THRESHOLD = 14.26          #Resnet50 2,3,4
 # THRESHOLD = 54          #Effib4
